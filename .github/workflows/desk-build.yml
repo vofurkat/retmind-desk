@@ -1,0 +1,347 @@
+# Сборка Retmind Desk в нашем открытом форке rustdesk (см. desk/README.md).
+# Положить в форк как .github/workflows/desk-build.yml, рядом — папку desk/brand/ из Retmind Support.
+# Основа — официальный .github/workflows/flutter-build.yml тега 1.5.3 (версии Flutter/Rust/vcpkg/LLVM
+# взяты оттуда). Оставлены только Windows x64 и macOS x64/arm64; перед сборкой — desk/brand/apply.sh.
+#
+# Переменные репозитория (необязательно, Settings → Secrets and variables → Actions → Variables):
+#   RENDEZVOUS_SERVER  по умолчанию desk.retmind.pro      RS_PUB_KEY  по умолчанию ключ нашего сервера
+#   DESK_SOURCE_URL    по умолчанию адрес этого форка (по AGPL показывается в «О программе»)
+# Тег desk-* (например desk-1.5.3-1) — сборка и выпуск Release с файлами; без версии в имени тоже
+# (retmind-desk-x86_64.exe …) — для постоянных ссылок «Скачать» …/releases/latest/download/<файл>.
+# Секреты (нет секретов — собирается без подписи, всё равно с артефактами):
+#   WINDOWS_PFX_BASE64, WINDOWS_PFX_PASSWORD     сертификат подписи кода (.pfx в base64)
+#   MACOS_P12_BASE64, MACOS_P12_PASSWORD         «Developer ID Application» (.p12 в base64)
+#   MACOS_CODESIGN_IDENTITY                      "Developer ID Application: Retmind ... (TEAMID)" — в кавычках
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD  для нотаризации (пароль приложения appleid.apple.com)
+name: Retmind Desk build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["desk-*"]
+
+env:
+  RUSTDESK_TAG: "1.5.3"
+  VERSION: "1.5.3"
+  RUST_VERSION: "1.75"
+  SCITER_RUST_VERSION: "1.75"
+  MAC_RUST_VERSION: "1.81"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  FLUTTER_MACOS_ARM_VERSION: "3.44.9"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  # Переменные репозитория можно не заводить: по умолчанию — наш сервер, его ключ и адрес этого форка
+  RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER || 'desk.retmind.pro' }}
+  RS_PUB_KEY: ${{ vars.RS_PUB_KEY || 'rkQDtUOfiNPfbHpwahlQQgJ3PCz35EHO2SP8kZwOoAI=' }}
+  DESK_SOURCE_URL: ${{ vars.DESK_SOURCE_URL || format('https://github.com/{0}', github.repository) }}
+  APP: RetmindDesk
+
+jobs:
+  generate-bridge:
+    # Файлы моста Flutter↔Rust: apply.sh не меняет сигнатуры в src/flutter_ffi.rs, мост общий с upstream
+    uses: ./.github/workflows/bridge.yml
+
+  build-topmost-window:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  windows:
+    name: Windows x64
+    needs: [generate-bridge, build-topmost-window]
+    runs-on: windows-2022
+    env:
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Retmind Desk branding
+        shell: bash
+        run: bash desk/brand/apply.sh .
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Replace engine with rustdesk custom flutter engine
+        run: |
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          mv -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Patch flutter
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: desk-windows-2022
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
+          mv -Force .\usbmmidd_v2 ./rustdesk
+          if (!(Test-Path ./rustdesk/$env:APP.exe)) { throw "нет ./rustdesk/$env:APP.exe — проверьте BINARY_NAME (apply.sh)" }
+
+      - name: Copy Runner.res for the portable packer
+        shell: bash
+        run: |
+          runner_res=$(find . -name "Runner.res" | head -1)
+          [ -n "$runner_res" ] && cp "$runner_res" ./libs/portable/Runner.res || echo "Runner.res not found"
+
+      - name: Download RustDeskTempTopMostWindow
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: topmostwindow-artifacts-x64
+          path: ./rustdesk
+
+      - name: Import code signing certificate
+        if: env.HAS_WIN_CERT == 'true'
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String("${{ secrets.WINDOWS_PFX_BASE64 }}"))
+          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          echo "SIGNTOOL=$($st.FullName)" >> $env:GITHUB_ENV
+
+      - name: Sign program files
+        if: env.HAS_WIN_CERT == 'true'
+        run: |
+          $files = Get-ChildItem ./rustdesk -Recurse -Include *.exe,*.dll | ForEach-Object { $_.FullName }
+          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\cert.pfx" /p "${{ secrets.WINDOWS_PFX_PASSWORD }}" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Retmind Desk" $files
+
+      - name: Build self-extracting exe
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/$APP.exe
+          popd
+          mkdir -p ./SignOutput
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/retmind-desk-$VERSION-x86_64.exe
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build msi
+        run: |
+          pushd ./res/msi
+          python preprocess.py --arp -d ../../rustdesk --app-name $env:APP -m "Retmind" -v $env:VERSION
+          nuget restore msi.sln
+          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
+          $msi = Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi | Select-Object -First 1
+          mv $msi.FullName ../../SignOutput/retmind-desk-$env:VERSION-x86_64.msi
+          popd
+
+      - name: Sign exe and msi
+        if: env.HAS_WIN_CERT == 'true'
+        run: |
+          $files = Get-ChildItem ./SignOutput/* -Include *.exe,*.msi | ForEach-Object { $_.FullName }
+          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\cert.pfx" /p "${{ secrets.WINDOWS_PFX_PASSWORD }}" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Retmind Desk" $files
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx"
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retmind-desk-windows-x64${{ env.HAS_WIN_CERT != 'true' && '-unsigned' || '' }}
+          path: SignOutput/*
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: [generate-bridge]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: macos-15-intel, target: x86_64-apple-darwin, flutter: "3.24.5",
+              bridge: bridge-artifact, build-args: "", min-macos: "" }
+          - { arch: aarch64, os: macos-15, target: aarch64-apple-darwin, flutter: "3.44.9",
+              bridge: bridge-artifact-flutter-3.44, build-args: "--screencapturekit", min-macos: "12.3" }
+    env:
+      HAS_MAC_CERT: ${{ secrets.MACOS_P12_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.bridge }}
+          path: ./
+
+      - name: Retmind Desk branding
+        run: bash desk/brand/apply.sh .
+
+      - name: Import Developer ID certificate
+        if: env.HAS_MAC_CERT == 'true'
+        uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+        with:
+          p12-file-base64: ${{ secrets.MACOS_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_P12_PASSWORD }}
+          keychain: desk
+
+      - name: Install build runtime
+        run: |
+          brew install llvm create-dmg nasm
+          command -v pkg-config >/dev/null || brew install pkg-config
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ matrix.flutter }}
+
+      - name: Flutter patches (as upstream)
+        run: |
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            flutter config --no-enable-swift-package-manager
+            brew install gnu-sed
+            export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+            bash .github/patches/apply_flutter_3.44_source_patches.sh
+          else
+            (cd $(dirname $(dirname $(which flutter))) && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff)
+          fi
+          cd "$(dirname "$(which flutter)")"
+          sed -i -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' ../packages/flutter/lib/src/scheduler/binding.dart
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: desk-${{ matrix.os }}
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        run: $VCPKG_ROOT/vcpkg install --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build
+        run: |
+          M="${{ matrix.min-macos }}"
+          if [ -n "$M" ]; then
+            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=$M/" build.py
+            sed -i -e "s/platform :osx, '.*'/platform :osx, '$M'/" flutter/macos/Podfile
+            sed -i -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"$M\"/" Cargo.toml
+            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = $M;/" flutter/macos/Runner.xcodeproj/project.pbxproj
+            echo "MACOSX_DEPLOYMENT_TARGET=$M" >> "$GITHUB_ENV"
+          fi
+          ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.build-args }}
+          test -d "./flutter/build/macos/Build/Products/Release/$APP.app"
+
+      - name: Sign app
+        if: env.HAS_MAC_CERT == 'true'
+        run: |
+          security default-keychain -s desk.keychain
+          security unlock-keychain -p "${{ secrets.MACOS_P12_PASSWORD }}" desk.keychain
+          bash ./.github/scripts/sign-macos-app.sh \
+            "./flutter/build/macos/Build/Products/Release/$APP.app" \
+            ${{ secrets.MACOS_CODESIGN_IDENTITY }} \
+            ./flutter/macos/Runner/Release.entitlements
+
+      - name: Create dmg
+        run: |
+          CREATE_DMG="$(readlink -f "$(command -v create-dmg)")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          create-dmg --volname "Retmind Desk" --icon "$APP.app" 200 190 --hide-extension "$APP.app" \
+            --window-size 800 400 --app-drop-link 600 185 \
+            "retmind-desk-$VERSION-${{ matrix.arch }}.dmg" "./flutter/build/macos/Build/Products/Release/$APP.app"
+
+      - name: Sign and notarize dmg
+        if: env.HAS_MAC_CERT == 'true'
+        run: |
+          DMG="retmind-desk-$VERSION-${{ matrix.arch }}.dmg"
+          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --strict "$DMG" -vvv
+          xcrun notarytool submit "$DMG" --apple-id "${{ secrets.APPLE_ID }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --password "${{ secrets.APPLE_APP_PASSWORD }}" --wait
+          xcrun stapler staple "$DMG"
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retmind-desk-macos-${{ matrix.arch }}${{ env.HAS_MAC_CERT != 'true' && '-unsigned' || '' }}
+          path: retmind-desk-*.dmg
+
+  release:
+    name: Release
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/desk-')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir art --pattern 'retmind-desk-*'
+          mkdir dist
+          find art -type f -name "retmind-desk-$VERSION-*" -exec cp {} dist/ \;
+          cd dist
+          for f in retmind-desk-"$VERSION"-*; do cp "$f" "${f/-$VERSION/}"; done
+          ls -la
+          signed="подписаны"
+          ls ../art | grep -q unsigned && signed="пока без подписи (Windows/macOS предупредят при запуске)"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "Retmind Desk $VERSION ($GITHUB_REF_NAME)" \
+            --notes "Retmind Desk на основе RustDesk $RUSTDESK_TAG (AGPL-3.0), сервер $RENDEZVOUS_SERVER. Файлы $signed. Исходники — этот репозиторий." \
+            ./*
