@@ -48,7 +48,8 @@ export DESK_SOURCE_URL=${DESK_SOURCE_URL:-https://github.com/retmind/retmind-des
 export DESK_DISPLAY_NAME=${DESK_DISPLAY_NAME:-Retmind Desk}
 export RENDEZVOUS_SERVER=${RENDEZVOUS_SERVER:-} RS_PUB_KEY=${RS_PUB_KEY:-} API_SERVER=${API_SERVER:-}
 
-python3 -I - <<'PY'
+# -X utf8: на Windows вывод по умолчанию cp1252, русский текст в print() ронял шаг (-I игнорирует PYTHONUTF8)
+python3 -I -X utf8 - <<'PY'
 import os, re, sys
 from pathlib import Path
 
