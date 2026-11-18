@@ -77,7 +77,8 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Install flutter
-        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        # Как в upstream flutter-build.yml для Windows: v2.12.0 (subosito/flutter-action#277)
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -87,7 +88,11 @@ jobs:
           flutter precache --windows
           Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
-          mv -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+          # Путь к Flutter не прописываем: у разных версий flutter-action он разный
+          $root = Split-Path -Parent (Split-Path -Parent (Get-Command flutter).Source)
+          $dst = Join-Path $root "bin/cache/artifacts/engine/windows-x64-release"
+          if (!(Test-Path $dst)) { throw "нет папки движка Flutter: $dst" }
+          Move-Item -Force windows-x64-release/* $dst
 
       - name: Patch flutter
         shell: bash
