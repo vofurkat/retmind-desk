@@ -301,6 +301,17 @@ jobs:
             ${{ secrets.MACOS_CODESIGN_IDENTITY }} \
             ./flutter/macos/Runner/Release.entitlements
 
+      - name: Ad-hoc sign app (no Developer ID yet)
+        # Без подписи (или со сломанной после сборки) macOS пишет «Приложение повреждено» и не даёт
+        # открыть. Подпись «-» (ad-hoc) целая — тогда macOS спрашивает про неизвестного разработчика,
+        # и приложение открывается через «Открыть» / «Конфиденциальность и безопасность → Всё равно открыть».
+        if: env.HAS_MAC_CERT != 'true'
+        run: |
+          A="./flutter/build/macos/Build/Products/Release/$APP.app"
+          xattr -cr "$A"
+          codesign --force --deep --sign - "$A"
+          codesign --verify --deep --strict --verbose=2 "$A"
+
       - name: Create dmg
         run: |
           CREATE_DMG="$(readlink -f "$(command -v create-dmg)")"
